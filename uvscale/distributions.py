@@ -2,11 +2,12 @@ import torch
 from torch._six import inf
 from torch.distributions import constraints
 from torch.distributions.transforms import ComposeTransform,ExpTransform,AffineTransform,PowerTransform
+from pyro.distributions.torch_distribution import TorchDistributionMixin
 from torch.distributions.gamma import Gamma
 from torch.distributions.transformed_distribution import TransformedDistribution
 from torch.distributions.utils import broadcast_all
 
-class Amoroso(torch.distributions.TransformedDistribution):
+class Amoroso(torch.distributions.TransformedDistribution, TorchDistributionMixin):
     arg_constraints = {
         'a': constraints.real,
         'theta': constraints.real,
