@@ -46,7 +46,7 @@ class RBF(gp.kernels.RBF):
 
 class Scale(gp.models.VariationalSparseGP):
     @classmethod
-    def from_resolution_and_structure_factors(cls, dHKL, centric, epsilon, F, num_inducing_points=1000, jitter=1e-4):
+    def from_resolution_and_structure_factors(cls, dHKL, centric, epsilon, F, num_inducing_points=100, jitter=1e-4):
         """
         Parameters
         ----------
