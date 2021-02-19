@@ -49,6 +49,46 @@ class Amoroso(torch.distributions.TransformedDistribution, TorchDistributionMixi
         beta = 2.
         return cls(0., theta, alpha, beta)
 
+    def mean(self):
+        """
+        The mean of of the Amoroso distribution exists for `alpha + 1/beta >= 0`.
+        It can be computed analytically by
+
+        ```
+        mean = a + theta * gamma(alpha + 1/beta) / gamma(alpha)
+        ```
+        """
+        a,theta,alpha,beta = self.a,self.theta,self.alpha,self.beta
+        return a + torch.exp(torch.log(theta)+torch.lgamma(alpha + torch.reciprocal(beta)) - torch.lgamma(alpha))
+
+    def variance(self):
+        """
+        The variance of of the Amoroso distribution exists for `alpha + 2/beta >= 0`.
+        It can be computed analytically by
+
+        ```
+        variance = theta**2 * (gamma(alpha + 2/beta) / gamma(alpha) - gamma(alpha + 1/beta)**2 / gamma(alpha)**2 )
+        ```
+        """
+        theta,alpha,beta = self.theta,self.alpha,self.beta
+        return theta**2. * (torch.exp(torch.lgamma(alpha + 2./beta) - torch.lgamma(alpha)) - torch.exp(2.*torch.lgamma(alpha + 1/beta) - 2.*torch.lgamma(alpha)))
+
+    def stddev(self):
+        """
+        The variance of of the Amoroso distribution exists for `alpha + 2/beta >= 0`.
+        It can be computed analytically by
+
+        ```
+        variance = theta**2 * (gamma(alpha + 2/beta) / gamma(alpha) - gamma(alpha + 1/beta)**2 / gamma(alpha)**2 )
+        ```
+
+        The standard deviation is computed by
+        ```amoroso.stddev() = torch.sqrt(amoroso.variance())```
+        """
+        return torch.sqrt(self.variance())
+
+
+
     def log_prob(self, value):
         a,theta,value = broadcast_all(self.a, self.theta, value)
         log_prob = super().log_prob(value)
