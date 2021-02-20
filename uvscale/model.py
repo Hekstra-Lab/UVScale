@@ -54,7 +54,6 @@ class RBF(gp.kernels.RBF):
 
 
 
-#class Scale(gp.models.VariationalSparseGP):
 class Scale(gp.models.VariationalSparseGP):
     @classmethod
     def from_resolution_and_structure_factors(cls, dHKL, centric, epsilon, F, num_inducing_points=100, jitter=1e-4):
@@ -84,8 +83,8 @@ class Scale(gp.models.VariationalSparseGP):
         X = dHKL[:,None]**-2.
         X = 1.*(X-X.mean())/X.std()
         y = F
-        Xu = torch.linspace(torch.min(X), torch.max(X), num_inducing_points)[:,None]
-        #Xu = X[np.random.choice(len(X), num_inducing_points, replace=False)]
+        #Xu = torch.linspace(torch.min(X), torch.max(X), num_inducing_points)[:,None]
+        Xu = X[np.random.choice(len(X), num_inducing_points, replace=False)]
         #kernel = gp.kernels.RationalQuadratic(input_dim=1)
         kernel = sum_kernels(
             gp.kernels.RBF(input_dim=1, lengthscale=torch.tensor(1.)),
