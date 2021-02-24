@@ -1,5 +1,4 @@
 import reciprocalspaceship as rs
-from uvscale.distributions import Amoroso,Stacy
 import torch
 import numpy as np
 from uvscale.model import Scale
