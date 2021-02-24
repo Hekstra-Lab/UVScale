@@ -142,7 +142,7 @@ class Scale(gp.models.VariationalSparseGP):
 
     @classmethod
     def anisotropic_from_mtz(cls, mtz_file, **kwargs):
-        ds = rs.read_mtz(mtz_file).stack_anomalous().compute_dHKL().label_centrics()
+        ds = rs.read_mtz(mtz_file)
         return cls.anisotropic_from_dataset(ds, **kwargs)
 
     @pyro_method
