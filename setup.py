@@ -12,6 +12,7 @@ setup(
         "pyro-ppl",
     ],
     scripts = [
+        "scripts/uvscale",
     ],
     setup_requires=['pytest-runner'],
     tests_require=['pytest', 'pytest-cov', 'pytest-xdist'],

@@ -1,0 +1,83 @@
+#!/usr/bin/env python
+
+import reciprocalspaceship as rs
+import torch
+import numpy as np
+from uvscale.model import Scale
+from argparse import ArgumentParser
+
+
+parser = ArgumentParser()
+parser.add_argument("mtz_file")
+parser.add_argument("-o", help="Output mtz file. If None, append '_out.mtz' to the input mtz filename.", default=None)
+parser.add_argument("--learning-rate", type=float, default=0.01)
+parser.add_argument("--beta-1", type=float, default=0.5)
+parser.add_argument("--beta-2", type=float, default=0.8)
+parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--batch-size", type=int, default=1000)
+parser.add_argument("--anisotropic", action="store_true")
+parser.add_argument("--sf-key", type=str, default=None)
+parser.add_argument("--num-inducing-points", type=int, default=100)
+parser = parser.parse_args()
+
+ds = rs.read_mtz(parser.mtz_file)
+
+sf_key = parser.sf_key
+
+outFN = parser.o
+if outFN is None:
+    outFN = parser.mtz_file[:-4] + '_out.mtz'
+
+if sf_key is None:
+    sf_keys = ds.keys()[(ds.dtypes == 'F')]
+    if len(sf_keys) == 0:
+        raise ValueError("No structure factor keys found in {parser.mtz_file}")
+    sf_key = sf_keys[0]
+
+sig_sf_key = None
+if 'Sig' + sf_key in ds:
+    sig_sf_key = 'Sig' + sf_key
+if 'SIG' + sf_key in ds:
+    sig_sf_key = 'SIG' + sf_key
+
+if parser.anisotropic:
+    model = Scale.anisotropic_from_dataset(ds, fkey=sf_key, num_inducing_points=parser.num_inducing_points)
+else:
+    model = Scale.isotropic_from_dataset(ds, fkey=sf_key, num_inducing_points=parser.num_inducing_points)
+
+losses = model.fit_model(
+    batch_size=parser.batch_size, 
+    epochs=parser.epochs, 
+    lr=parser.learning_rate, 
+    betas=(parser.beta_1, parser.beta_2)
+)
+
+
+loc,var = model(model.X)
+
+sqrt_eps = np.sqrt(ds.compute_multiplicity().EPSILON.to_numpy(np.float32))
+ds['SqrtSigma'] = rs.DataSeries(
+    loc.detach().numpy()*sqrt_eps, 
+    index=ds.index,
+    dtype='MTZReal',
+)
+ds['SigSqrtSigma'] = rs.DataSeries(
+    var.sqrt().detach().numpy()*sqrt_eps, 
+    index=ds.index,
+    dtype='MTZReal',
+)
+ds['E'] = rs.DataSeries(
+    ds[sf_key] / ds['SqrtSigma'] / sqrt_eps, 
+    index=ds.index,
+    dtype='E',
+)
+if sig_sf_key is not None:
+    ds['SigE'] = rs.DataSeries(
+        np.abs(ds.E) * np.sqrt((ds[sig_sf_key]/ds[sf_key])**2. + (ds['SigSqrtSigma']/ds['SqrtSigma'])**2.),
+        index=ds.index,
+        dtype='Q',
+    )
+
+ds.write_mtz(outFN)
+
+
