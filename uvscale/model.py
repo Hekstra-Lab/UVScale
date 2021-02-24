@@ -120,7 +120,7 @@ class Scale(gp.models.VariationalSparseGP):
 
     @classmethod
     def anisotropic_from_dataset(cls, ds, fkey=None, **kwargs):
-        ds = ds.stack_anomalous().compute_dHKL().label_centrics().compute_multiplicity()
+        ds = ds.compute_dHKL().label_centrics().compute_multiplicity()
         X = ds.get_hkls().astype(np.float32)
 
         if fkey is None:
