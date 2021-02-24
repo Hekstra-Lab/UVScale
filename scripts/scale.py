@@ -1,46 +1,38 @@
 import reciprocalspaceship as rs
-from uvscale.distributions import Amoroso
+from uvscale.distributions import Amoroso,Stacy
 import torch
 import numpy as np
 from uvscale.model import Scale
 
 inFN = 'pyp_0.mtz'
-ds = rs.read_mtz(inFN).compute_dHKL().compute_multiplicity().label_centrics()
-
-dHKL = ds.dHKL.to_numpy(np.float32)
-centric = ds.CENTRIC.to_numpy()
-epsilon = ds.EPSILON.to_numpy(np.float32)
-F = ds.F.to_numpy(np.float32)
-#
-model = Scale.from_resolution_and_structure_factors(dHKL, centric, epsilon, F)
+model = Scale.isotropic_from_mtz(inFN, num_inducing_points=100)
 
 
-
-
-num_steps = 500
-#losses = model.map_fit_model(num_steps)
-losses = model.fit_model(num_steps)
+losses = model.fit_model(batch_size=100, epochs=100)
 
 from matplotlib import pyplot as plt
 
 plt.figure()
 plt.plot(losses)
 
-plt.figure()
+plt.figure(figsize=(7, 4))
+loc,scale = model(model.X)
+loc = loc.detach().numpy()
+scale = scale.sqrt().detach().numpy()
 X = model.X.detach().numpy().flatten()
-loc = model.likelihood.rec_func(model(model.X)[0])
-q = Amoroso.wilson_prior(torch.tensor(False), torch.tensor(1.), loc)
-loc = q.mean().detach().numpy().flatten()
-scale = q.stddev().detach().numpy().flatten()
 
 idx = np.argsort(X)
 X,loc,scale = X[idx],loc[idx],scale[idx]
 plt.fill_between(X, loc-scale, loc+scale, alpha=0.5)
 plt.plot(X, loc, 'k-')
 
+loc,scale = model(model.Xu)
+loc = loc.detach().numpy()
+scale = scale.sqrt().detach().numpy()
 X = model.Xu.detach().numpy().flatten()
-loc = model.likelihood.rec_func(model(model.Xu)[0])
-loc  = Amoroso.wilson_prior(torch.tensor(False), torch.tensor(1.), loc).mean().detach().numpy().flatten()
+
+idx = np.argsort(X)
+X,loc,scale = X[idx],loc[idx],scale[idx]
 plt.plot(X, loc, 'r.')
 
 plt.plot(model.X.detach(), model.y.detach(), 'kx', alpha=0.2, zorder=0)

@@ -1,10 +1,14 @@
 import pyro 
 import numpy as np
-from .distributions import Amoroso
+import reciprocalspaceship as rs
+from pyro.contrib.gp.util import conditional
+from .distributions import Stacy
 import torch
 import pyro.contrib.gp as gp
 import pyro.distributions as dist
+import pyro.poutine as poutine
 from pyro.distributions.util import broadcast_all
+from pyro.nn.module import pyro_method
 
 
 def sum_kernels(*args):
@@ -14,127 +18,211 @@ def sum_kernels(*args):
     return kernel
 
 class FWilsonLikelihood(gp.likelihoods.Likelihood):
-    def __init__(self, centric, epsilon, rec_func=None):
-        super().__init__()
-        self.centric = centric
-        self.epsilon = epsilon
-        if rec_func is None:
-            self.rec_func = torch.nn.Softplus()
-            #eps = 1e-5
-            #self.rec_func = lambda x : x.clamp(min=eps)
-
-    def forward(self, f_loc, f_var, y=None):
-        Sigma = dist.Normal(f_loc, f_var.sqrt())()
-        Sigma = self.rec_func(Sigma)
-        idx = Sigma > 0
-        Sigma = Sigma[idx]
-        centric = self.centric[idx]
-        epsilon = self.epsilon[idx]
-        y_dist = Amoroso.wilson_prior(centric, epsilon, Sigma)
-        if y is not None:
-            y_dist = y_dist.expand_by(y.shape[:-Sigma.dim()]).to_event(y.dim())
-        return pyro.sample(self._pyro_get_fullname("y"), y_dist, obs=y)
-
-class RBF(gp.kernels.RBF):
-    def _square_scaled_dist(self, X, Z=None):
-        r"""
-        Returns :math:`\|\frac{X-Z}{l}\|^2`.
+    def __init__(self, deg=50):
         """
-        if Z is None:
-            Z = X
-        X = self._slice_input(X)
-        Z = self._slice_input(Z)
-        if X.size(1) != Z.size(1):
-            raise ValueError("Inputs must have the same number of features.")
+        Parameters
+        deg : int
+            The degree of Chebyshev polynomial approximation being used.
+        """
+        super().__init__()
+        self.deg = deg
 
-        scaled_X = X / self.lengthscale
-        scaled_Z = Z / self.lengthscale
-        r2 = ((scaled_X[:,None,...] - scaled_Z[None,:,...])**2).sum(-1)
-        return r2.clamp(min=0)
-
-
-
-class Scale(gp.models.VariationalSparseGP):
-    @classmethod
-    def from_resolution_and_structure_factors(cls, dHKL, centric, epsilon, F, num_inducing_points=100, jitter=1e-4):
+    def forward(self, f_loc, f_var, y, centric, epsilon):
         """
         Parameters
         ----------
-        dHKL : tensor(float)
-            Resolution of each reflection
-        centric : tensor(bool)
-            True for centrics reflections, False for acentrics
-        epsilon : tensor(float)
-            The multiplicities of each reflection
-        F : tensor(float)
-            Observed structure factor
+        f_loc : torch.Tensor
+            The mean of the GP posterior. 
+        f_var : torch.Tensor
+            The variance of the GP posterior.
+        y : torch.Tensor
+            Experimental structure factor amplitude
+        centric : torch.Tensor
+            A tensor of booleans indicating which of the structure factors are centric.
+        epsilon : torch.Tensor
+            A tensor of floating point reflection multiplicities.
         """
-        if not torch.is_tensor(dHKL):
-            dHKL = torch.tensor(dHKL)
-        if not torch.is_tensor(centric):
-            centric = torch.tensor(centric)
-        if not torch.is_tensor(epsilon):
-            epsilon = torch.tensor(epsilon)
-        if not torch.is_tensor(F):
-            F = torch.tensor(F)
+        grid, weights = np.polynomial.chebyshev.chebgauss(self.deg)
+        weights = torch.tensor(weights)
+        loc,scale = f_loc,f_var.sqrt()
 
-        dHKL, centric, epsilon, F = broadcast_all(dHKL, centric, epsilon, F)
-        likelihood = FWilsonLikelihood(centric, epsilon)
-        X = dHKL[:,None]**-2.
-        X = 1.*(X-X.mean())/X.std()
-        y = F
-        #Xu = torch.linspace(torch.min(X), torch.max(X), num_inducing_points)[:,None]
+        #Change of interval
+        width = scale*20. 
+        lower = torch.maximum(loc - width/2., torch.tensor(0.))
+        upper = lower + width
+        prefactor = (upper - lower)/2.
+        Sigma = (upper - lower)[None,:]*torch.tensor(grid)[:,None]/2. + (upper + lower)[None,:]/2.
+        weights = weights*np.sqrt(1 - grid**2.)
+
+        #Make the wilson distributions
+        centric = self.centric if centric is None else centric
+        epsilon = self.epsilon if epsilon is None else epsilon
+        theta = centric*torch.sqrt(2. * epsilon) * Sigma + (~centric)*torch.sqrt(epsilon)*Sigma
+        alpha = centric*0.5 + (~centric)*1.
+        beta = 2.
+        wilson_dist = Stacy(theta, alpha, beta)
+
+        #Compute the <log P(I | X)> = int log P(I | Σ) * P(Σ | X) dΣ
+        ll = wilson_dist.log_prob(y) * torch.exp(dist.Normal(loc, scale).log_prob(Sigma))
+        expected_ll = prefactor * (weights@ll)
+
+        y_dist = pyro.distributions.Delta(y, log_density=expected_ll)
+        return pyro.sample(self._pyro_get_fullname("y"), y_dist, obs=y)
+
+class Scale(gp.models.VariationalSparseGP):
+    def __init__(self, X, y, kernel, Xu, likelihood, centric, epsilon, mean_function=None, num_data=None, whiten=False, jitter=1e-6):
+        """
+        Most users will find the `classmethod` decorated constructors more useful for constructing these `Scale` models.
+        """
+        super().__init__(X, y, kernel, Xu, likelihood, 
+            mean_function=mean_function, num_data=num_data, whiten=whiten, jitter=jitter)
+        self.centric = centric
+        self.epsilon = epsilon
+
+    @classmethod
+    def _from_x_y_centric_epsilon(cls, X, y, centric, epsilon, kernel=None, num_inducing_points=100, **kwargs):
+        if kernel is None:
+            kernel = sum_kernels(
+                gp.kernels.RBF(input_dim=1, lengthscale=torch.tensor(1.)),
+                gp.kernels.RationalQuadratic(input_dim=1, lengthscale=torch.tensor(1.)),
+                gp.kernels.Matern32(input_dim=1, lengthscale=torch.tensor(1.)),
+                gp.kernels.Matern52(input_dim=1, lengthscale=torch.tensor(1.)),
+                gp.kernels.WhiteNoise(input_dim=1, variance=torch.tensor(0.01)),
+            )
+
         Xu = X[np.random.choice(len(X), num_inducing_points, replace=False)]
-        #kernel = gp.kernels.RationalQuadratic(input_dim=1)
-        kernel = sum_kernels(
-            gp.kernels.RBF(input_dim=1, lengthscale=torch.tensor(1.)),
-            gp.kernels.RationalQuadratic(input_dim=1, lengthscale=torch.tensor(1.)),
-            gp.kernels.Matern32(input_dim=1, lengthscale=torch.tensor(1.)),
-            gp.kernels.Matern52(input_dim=1, lengthscale=torch.tensor(1.)),
-            gp.kernels.WhiteNoise(input_dim=1),
-        )
-        #kernel = RBF(input_dim=1) 
-        return cls(X, y, kernel, Xu, likelihood, jitter=jitter, mean_function=lambda x: torch.mean(y))
-#
-#    def fit_model(self, num_steps, num_particles=1):
-#        loss = pyro.infer.TraceMeanField_ELBO(num_particles).differentiable_loss
-#        opt = torch.optim.Adam(self.parameters(), lr=0.001)
-#        return gp.util.train(self, num_steps=num_steps, optimizer=opt, loss_fn=loss)
+        likelihood = FWilsonLikelihood()
+        if 'mean_function' not in kwargs:
+            mean = y.mean()
+            kwargs['mean_function'] = lambda x: mean
 
-    def posterior(self):
+        X,y,Xu,centric,epsilon = map(torch.tensor, (X,y,Xu,centric,epsilon))
+
+        return cls(X, y, kernel, Xu, likelihood, centric, epsilon, **kwargs)
+        
+
+    @classmethod
+    def isotropic_from_dataset(cls, ds, fkey=None, **kwargs):
+        ds = ds.compute_dHKL().label_centrics().compute_multiplicity()
+        X = ds.dHKL.to_numpy(np.float32)[:,None]**-2.
+
+        if fkey is None:
+            fkeys = ds.keys()[ds.dtypes=='F']
+            if len(fkeys) == 0:
+                raise ValueError("No fkey supplied and no columns with dtype=='F' in ds")
+            fkey = fkeys[0]
+        y = ds[fkey].to_numpy(np.float32)
+
+        centric = ds.CENTRIC.to_numpy(bool)
+        epsilon = ds.EPSILON.to_numpy(np.float32)
+
+        return cls._from_x_y_centric_epsilon(X, y, centric, epsilon, **kwargs)
+
+    @classmethod
+    def anisotropic_from_dataset(cls, ds, fkey=None, **kwargs):
+        ds = ds.stack_anomalous().compute_dHKL().label_centrics().compute_multiplicity()
+        X = ds.get_hkls().astype(np.float32)
+
+        if fkey is None:
+            fkeys = ds.keys()[ds.dtypes=='F']
+            if len(fkeys) == 0:
+                raise ValueError("No fkey supplied and no columns with dtype=='F' in ds")
+            fkey = fkeys[0]
+        y = ds[fkey].to_numpy(np.float32)
+
+        centric = ds.CENTRIC.to_numpy(bool)
+        epsilon = ds.EPSILON.to_numpy(np.float32)
+
+        return cls._from_x_y_centric_epsilon(X, y, centric, epsilon, **kwargs)
+
+    @classmethod
+    def isotropic_from_mtz(cls, mtz_file, **kwargs):
+        ds = rs.read_mtz(mtz_file)
+        return cls.isotropic_from_dataset(ds, **kwargs)
+
+    @classmethod
+    def anisotropic_from_mtz(cls, mtz_file, **kwargs):
+        ds = rs.read_mtz(mtz_file).stack_anomalous().compute_dHKL().label_centrics()
+        return cls.anisotropic_from_dataset(ds, **kwargs)
+
+    @pyro_method
+    def model(self):
         """
-        Return the posterior over structure factors associated with self.X.
-        This is not technically the "True" posterior but a decent stand in.
-        Getting the "real" posterior would involve an integral over Sigma.
-        Properly, this is Wilson(<Sigma>)
-
-        Returns
-        -------
-        distributions.Amoroso
-
+        This is verbatim the pyro VSPGP model method except that the call to
+        the likelihood was modified to pass centric and epsilon. 
         """
-        Sigma, _ = self(self.X)
-        Sigma = self.likelihood.rec_func(Sigma)
-        return Amoroso.wilson_prior(self.likelihood.centric, self.likelihood.epsilon, Sigma)
+        self.set_mode("model")
 
-    def fit_model(self, num_steps, lr=0.01, num_particles=1, retain_graph=None):
-        from tqdm import trange
+        M = self.Xu.size(0)
+        Kuu = self.kernel(self.Xu).contiguous()
+        Kuu.view(-1)[::M + 1] += self.jitter  # add jitter to the diagonal
+        Luu = Kuu.cholesky()
+
+        zero_loc = self.Xu.new_zeros(self.u_loc.shape)
+        if self.whiten:
+            identity = eye_like(self.Xu, M)
+            pyro.sample(self._pyro_get_fullname("u"),
+                        dist.MultivariateNormal(zero_loc, scale_tril=identity)
+                            .to_event(zero_loc.dim() - 1))
+        else:
+            pyro.sample(self._pyro_get_fullname("u"),
+                        dist.MultivariateNormal(zero_loc, scale_tril=Luu)
+                            .to_event(zero_loc.dim() - 1))
+
+        f_loc, f_var = conditional(self.X, self.Xu, self.kernel, self.u_loc, self.u_scale_tril,
+                                   Luu, full_cov=False, whiten=self.whiten, jitter=self.jitter)
+
+        f_loc = f_loc + self.mean_function(self.X)
+        if self.y is None:
+            return f_loc, f_var
+        else:
+            # we would like to load likelihood's parameters outside poutine.scale context
+            self.likelihood._load_pyro_samples()
+            with poutine.scale(scale=self.num_data / self.X.size(0)):
+                return self.likelihood(f_loc, f_var, self.y, self.centric, self.epsilon)
+
+    def set_data(self, X, y=None, centric=None, epsilon=None):
+        super().set_data(X, y)
+        self.centric = centric
+        self.epsilon = epsilon
+
+    def fit_model(self, batch_size, epochs, lr=0.001, betas=(0.9, 0.99), num_particles=1, retain_graph=None):
+        from tqdm import tqdm
+        splits = int(len(self.X) / batch_size)
+
+        #Cache full data set
+        X,y,centric,epsilon = self.X,self.y,self.centric,self.epsilon
+
         losses = []
         loss_fn = pyro.infer.TraceMeanField_ELBO(num_particles).differentiable_loss
-        #loss_fn = pyro.infer.Trace_ELBO(num_particles).differentiable_loss
-        opt = torch.optim.Adam(self.parameters(), lr=lr)
+        opt = torch.optim.Adam(self.parameters(), lr=lr, betas=betas)
 
-        def closure():
-            opt.zero_grad()
-            loss = loss_fn(self.model, self.guide)
-            if not(torch.isfinite(loss)):
+        for i in tqdm(range(epochs), desc="Overall", position=0, leave=True, total=epochs):
+            for (
+                    batch_X,
+                    batch_y,
+                    batch_centric,
+                    batch_epsilon,
+                ) in tqdm(zip(
+                    X.split(batch_size),
+                    y.split(batch_size),
+                    centric.split(batch_size),
+                    epsilon.split(batch_size),
+                ), 
+                desc=f"  Epoch", total=splits-1, position=1, leave=False):
+                # Execute training step
+                self.set_data(batch_X, batch_y, batch_centric, batch_epsilon)
                 opt.zero_grad()
-                print("Loss was not finite, zeroing gradients")
-            pyro.infer.util.torch_backward(loss, retain_graph=retain_graph)
-            return loss
+                loss = loss_fn(self.model, self.guide)
+                if not(torch.isfinite(loss)):
+                    opt.zero_grad()
+                    print("Loss was not finite, zeroing gradients")
+                pyro.infer.util.torch_backward(loss, retain_graph=retain_graph)
+                losses.append(loss.item())
+                opt.step()
 
-        for i in trange(num_steps):
-            loss = opt.step(closure)
-            losses.append(loss.item())
-
+        #Return to original data
+        self.set_data(X, y, centric, epsilon)
         return losses
+        
+
