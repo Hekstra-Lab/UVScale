@@ -67,7 +67,8 @@ class FWilsonLikelihood(gp.likelihoods.Likelihood):
         expected_ll = prefactor * (weights@ll)
 
         y_dist = pyro.distributions.Delta(y, log_density=expected_ll)
-        return pyro.sample(self._pyro_get_fullname("y"), y_dist, obs=y)
+        with pyro.plate('wilson_ll'):
+            return pyro.sample(self._pyro_get_fullname("y"), y_dist, obs=y)
 
 class Scale(gp.models.VariationalSparseGP):
     def __init__(self, X, y, kernel, Xu, likelihood, centric, epsilon, mean_function=None, num_data=None, whiten=False, jitter=1e-6):
