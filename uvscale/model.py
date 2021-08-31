@@ -82,14 +82,16 @@ class Scale(gp.models.VariationalSparseGP):
 
     @classmethod
     def _from_x_y_centric_epsilon(cls, X, y, centric, epsilon, kernel=None, num_inducing_points=100, **kwargs):
+        d = X.shape[-1]
         if kernel is None:
-            kernel = sum_kernels(
-                gp.kernels.RBF(input_dim=1, lengthscale=torch.tensor(1.)),
-                gp.kernels.RationalQuadratic(input_dim=1, lengthscale=torch.tensor(1.)),
-                gp.kernels.Matern32(input_dim=1, lengthscale=torch.tensor(1.)),
-                gp.kernels.Matern52(input_dim=1, lengthscale=torch.tensor(1.)),
-                gp.kernels.WhiteNoise(input_dim=1, variance=torch.tensor(0.01)),
-            )
+            kernel = gp.kernels.RBF(input_dim=d, lengthscale=torch.tensor(torch.ones(d)))
+            #kernel = sum_kernels(
+            #    gp.kernels.RBF(input_dim=1, lengthscale=torch.tensor(1.)),
+            #    #gp.kernels.RationalQuadratic(input_dim=1, lengthscale=torch.tensor(1.)),
+            #    #gp.kernels.Matern32(input_dim=1, lengthscale=torch.tensor(1.)),
+            #    #gp.kernels.Matern52(input_dim=1, lengthscale=torch.tensor(1.)),
+            #    gp.kernels.WhiteNoise(input_dim=1, variance=torch.tensor(0.01)),
+            #)
 
         Xu = X[np.random.choice(len(X), num_inducing_points, replace=False)]
         likelihood = FWilsonLikelihood()

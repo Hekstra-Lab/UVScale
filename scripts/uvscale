@@ -10,14 +10,16 @@ from argparse import ArgumentParser
 parser = ArgumentParser()
 parser.add_argument("mtz_file")
 parser.add_argument("-o", help="Output mtz file. If None, append '_out.mtz' to the input mtz filename.", default=None)
-parser.add_argument("--learning-rate", type=float, default=0.01)
-parser.add_argument("--beta-1", type=float, default=0.5)
-parser.add_argument("--beta-2", type=float, default=0.8)
+parser.add_argument("--jitter", type=float, default=1e-2)
+parser.add_argument("--learning-rate", type=float, default=0.001)
+parser.add_argument("--beta-1", type=float, default=0.9)
+parser.add_argument("--beta-2", type=float, default=0.99)
 parser.add_argument("--epochs", type=int, default=100)
-parser.add_argument("--batch-size", type=int, default=1000)
+parser.add_argument("--batch-size", type=int, default=10)
 parser.add_argument("--anisotropic", action="store_true")
 parser.add_argument("--sf-key", type=str, default=None)
 parser.add_argument("--num-inducing-points", type=int, default=100)
+parser.add_argument("--embed", action="store_true")
 parser = parser.parse_args()
 
 ds = rs.read_mtz(parser.mtz_file)
@@ -41,9 +43,9 @@ if 'SIG' + sf_key in ds:
     sig_sf_key = 'SIG' + sf_key
 
 if parser.anisotropic:
-    model = Scale.anisotropic_from_dataset(ds, fkey=sf_key, num_inducing_points=parser.num_inducing_points)
+    model = Scale.anisotropic_from_dataset(ds, fkey=sf_key, num_inducing_points=parser.num_inducing_points, jitter=parser.jitter)
 else:
-    model = Scale.isotropic_from_dataset(ds, fkey=sf_key, num_inducing_points=parser.num_inducing_points)
+    model = Scale.isotropic_from_dataset(ds, fkey=sf_key, num_inducing_points=parser.num_inducing_points, jitter=parser.jitter)
 
 losses = model.fit_model(
     batch_size=parser.batch_size, 
@@ -81,3 +83,6 @@ if sig_sf_key is not None:
 ds.write_mtz(outFN)
 
 
+if parser.embed:
+    from IPython import embed
+    embed(colors='linux')
